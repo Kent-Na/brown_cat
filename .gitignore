@@ -1,0 +1,9 @@
+test
+*.swp
+.sconsign.dblite
+*.o
+build
+core*
+*.pyc
+contexts
+.*
