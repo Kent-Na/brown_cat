@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <errno.h>
 #include <unistd.h>
+#include <pwd.h>
 #include <arpa/inet.h>
 #include <sys/epoll.h>
 #include <sys/types.h>
@@ -21,6 +22,8 @@ struct output_info{
 	uint16_t output_port;
 };
 
+//process owner name
+static const char* user_name = "czel";
 static const char* target_field_name = "Host";
 
 //Host name and related internal port number.
@@ -141,6 +144,12 @@ int main(int argc, char **argv){
 						sizeof s_addr);
 		if (err) return 0;
 	}
+
+	{
+		struct passwd* pw = getpwnam(user_name);
+		setuid(pw->pw_uid);
+	}
+
 	{
 		int err = listen(listen_fd, 16);
 		if (err) return 0;
