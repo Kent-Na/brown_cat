@@ -11,13 +11,31 @@
 #include <netinet/in.h>
 #include "rcp_buffer.h"
 
-const uint16_t input_port = 8080;
-const uint32_t buffer_size=4096;
+static const uint16_t input_port = 8080;
+static const uint32_t buffer_size=4096;// and maximum http header size
 
 #define max_connection_count  1024
 
-#define CAT_IS_RECEIVING_HEADER 1
-#define CAT_IS_RECEIVED_HEADER 2
+struct output_info{
+	const char* domain_name;
+	uint16_t output_port;
+};
+
+static const char* target_field_name = "Host";
+
+//Host name and related internal port number.
+//Last ently must be NULL host name and used as default.
+static struct output_info target_table[] = {
+	{"127.0.0.1:8080", 80},
+	{"www.tuna-cat.com", 8080},
+	{"lab.tuna-cat.com", 8080},
+	{"rcp.tuna-cat.com", 4001},
+	{NULL, 80}//default
+};
+
+#define CAT_IS_RECEIVING_HEADER 0
+#define CAT_IS_RECEIVED_HEADER 1
+#define CAT_WANT_DIE 2
 
 struct cat_info;
 
@@ -32,6 +50,10 @@ struct cat_info{
 	struct rcp_buffer ex_to_in_buffer;
 	struct rcp_buffer in_to_ex_buffer;
 
+	//precessing http header line, does not contain end
+	uint8_t* line_begin;
+	//uint8_t* line_end;
+
 	struct event_info ex_event;	
 	struct event_info in_event;	
 
@@ -41,24 +63,8 @@ struct cat_info{
 
 	int state;
 
-	uint8_t ex_fd_read_shutdowned;
-	uint8_t in_fd_read_shutdowned;
-};
-
-
-struct output_info{
-	const char* domain_name;
-	uint16_t output_port;
-};
-
-
-//Host name and related internal port number.
-//Last ently must be NULL host name and used as default.
-struct output_info target_table[] = {
-	{"www.tuna-cat.com", 8080},
-	{"lab.tuna-cat.com", 8080},
-	{"rcp.tuna-cat.com", 4001},
-	{NULL, 80}//default
+	uint8_t in_w_ex_r_shutdowned;
+	uint8_t ex_w_in_r_shutdowned;
 };
 
 static struct cat_info info_buffer[max_connection_count];
@@ -68,8 +74,8 @@ struct cat_info* free_info;
 
 ///
 //prototypes
-void setup_new_connection(int epfd, int listen_fd);
-void setup_in_fd(struct cat_info* info, int epfd);
+void setup_new_connection(int epfd);
+void setup_in_fd(struct cat_info* info, struct output_info* o_info);
 void in_action(struct cat_info* info, struct epoll_event* ev);
 void ex_action(struct cat_info* info, struct epoll_event* ev);
 
@@ -77,20 +83,31 @@ void reset_cat(struct cat_info* info){
 	info->ex_fd = -1;
 	info->in_fd = -1;
 	info->state = 0;
-	info->ex_fd_read_shutdowned = 0;
-	info->in_fd_read_shutdowned = 0;
+	info->in_w_ex_r_shutdowned = 0;
+	info->ex_w_in_r_shutdowned = 0;
 	info->in_event.target = info;
 	info->in_event.action= in_action;
 	info->ex_event.target = info;
 	info->ex_event.action= ex_action;
 	rcp_buffer_consumed_all(&info->ex_to_in_buffer);
 	rcp_buffer_consumed_all(&info->in_to_ex_buffer);
+	info->state = CAT_IS_RECEIVING_HEADER;
+	info->line_begin = rcp_buffer_data(&info->ex_to_in_buffer);
 }
+
+void free_cat(struct cat_info* info){
+	struct cat_info* old_free = free_info;
+	free_info = info;
+	info->next = old_free;
+	printf("i'm dead \n");
+}
+
+static int epfd = -1;
 
 int main(int argc, char **argv){
 
 	//setup ep
-	int epfd = epoll_create(1);
+	epfd = epoll_create(1);
 
 	//setup info buffer
 	for (int i=0; i<max_connection_count; i++){
@@ -154,7 +171,7 @@ int main(int argc, char **argv){
 			struct epoll_event *event = events+i;
 			struct event_info *info = event->data.ptr;
 			if (info == NULL)
-				setup_new_connection(epfd, listen_fd);
+				setup_new_connection(listen_fd);
 			else
 				info->action(info->target, event);
 		}
@@ -162,7 +179,8 @@ int main(int argc, char **argv){
 	return 0;
 }
 
-void setup_new_connection(int epfd, int listen_fd){
+void setup_new_connection(int listen_fd){
+	printf("----yay, new cat\n");
 	struct sockaddr c_addr;
 	socklen_t addr_len = sizeof c_addr;
 	struct cat_info* info = free_info;
@@ -171,6 +189,7 @@ void setup_new_connection(int epfd, int listen_fd){
 		return;
 	}
 	free_info = info->next;
+	reset_cat(info);
 	int fd = accept4(listen_fd, &c_addr, &addr_len, SOCK_NONBLOCK);
 	struct epoll_event ev;
 	ev.events = EPOLLIN|EPOLLOUT|EPOLLPRI|
@@ -180,17 +199,10 @@ void setup_new_connection(int epfd, int listen_fd){
 	if (err) return;
 
 	info->ex_fd = fd;
-	setup_in_fd(info, epfd);
 }
 
 
-void setup_in_fd(struct cat_info* info, int epfd){
-	
-	struct output_info* o_info = target_table;
-	while (o_info->domain_name){
-		//compair_name_here
-		o_info ++;
-	}
+void setup_in_fd(struct cat_info* info, struct output_info *o_info){
 
 	char* ip = "183.181.20.215";
 
@@ -209,6 +221,7 @@ void setup_in_fd(struct cat_info* info, int epfd){
 	}
 
 	info->in_fd = fd;
+	info->state = CAT_IS_RECEIVED_HEADER;
 
 	struct epoll_event ev;
 	ev.events = EPOLLIN|EPOLLOUT|EPOLLPRI|
@@ -216,19 +229,8 @@ void setup_in_fd(struct cat_info* info, int epfd){
 	ev.data.ptr = &info->in_event;
 	err = epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev);
 	if (err) return;
-}
 
-void kill_cat(struct cat_info* info){
-
-	close(info->ex_fd);
-	close(info->in_fd);
-
-	rcp_buffer_consumed_all(&info->ex_to_in_buffer);
-	rcp_buffer_consumed_all(&info->in_to_ex_buffer);
-
-	struct cat_info* old_free = free_info;
-	free_info = info;
-	info->next = old_free;
+	printf("connect to in\n");
 }
 
 ssize_t receive_from(int fd, struct rcp_buffer* buffer){
@@ -264,14 +266,15 @@ void transfer_a_to_b(int fd_a, int fd_b, struct rcp_buffer* buffer){
 		ssize_t r_len;
 		if (rcp_buffer_space_size(buffer) != 0)
 			r_len = receive_from(fd_a, buffer);
-		int r_errno = errno;
+		if (r_len == -1);
+		//int r_errno = errno;
 
 		//if nodata in buffer,end it.
 		if (rcp_buffer_data_size(buffer) == 0)
 			return;
 
 		size_t s_len = send_to(fd_b, buffer);
-		int s_errno = errno;
+		//int s_errno = errno;
 
 		if (s_len == -1){
 			return;
@@ -287,14 +290,122 @@ void transfer_in_to_ex(struct cat_info* info){
 	transfer_a_to_b(info->in_fd, info->ex_fd, &info->in_to_ex_buffer);
 }
 
+void process_field_value(
+	struct cat_info* info, uint8_t *begin, uint8_t *end){
+	//*end must be '\n'
+	if (end - begin < 2) return;
+	if (end[-1] != '\n') return;
+	if (end[-2] != '\r') return;
+
+	uint8_t *itr = begin;
+	while (itr != end && (*itr == '\t' || *itr == ' ')) itr ++;
+
+	begin = itr;
+
+	struct output_info* o_info = target_table;
+	while (o_info->domain_name){
+		uint8_t *tgt = (uint8_t*) o_info->domain_name;
+		uint8_t is_match= 0;
+		
+		for (itr = begin; itr != end; itr++, tgt++){
+			if (*tgt == '\0'){
+				is_match = 1;
+				break;
+			}
+			if (*itr != *tgt) break;
+		}
+
+		if (is_match){
+			while (itr != end && (*itr == '\t' || *itr == ' ')) itr ++;
+			if (*itr == '\r') break;// OK
+		}
+
+		o_info ++;
+	}
+
+	setup_in_fd(info, o_info);
+}
+
+void process_line(struct cat_info* info, uint8_t *begin, uint8_t *end){
+	//*end must be '\n'
+	if (end - begin < 2) return;
+
+	if (end[-1] != '\n') return;
+
+	if (end[-2] != '\r') return;
+
+	if (end-begin == 2){
+		//find default target
+		struct output_info* o_info = target_table;
+		while (o_info->domain_name) o_info ++;
+		setup_in_fd(info, o_info);
+		return;
+	}
+
+	uint8_t *tgt = (uint8_t*) target_field_name;
+	
+	for (uint8_t *itr = begin; itr != end; itr++, tgt++){
+		if (*tgt == '\0' && *itr == ':'){
+			process_field_value(info, itr+1, end);
+			return;
+		}
+		if (*itr != *tgt) return;
+	}
+}
+
+void precess_header(struct cat_info* info){
+	struct rcp_buffer* buffer = &info->ex_to_in_buffer;
+	ssize_t r_len;
+	if (rcp_buffer_space_size(buffer) != 0)
+		r_len = receive_from(info->ex_fd, buffer);
+
+	uint8_t *data_end = 
+		rcp_buffer_data(buffer)+rcp_buffer_data_size(buffer);
+
+	if (r_len <= 0)
+		return;
+	
+	for (uint8_t *itr = info->line_begin +1; itr < data_end; itr++){
+		if (itr[0] == '\n' && itr[-1] == '\r'){
+			//ignore first line
+			if (rcp_buffer_data(buffer) != info->line_begin){
+				process_line(info, info->line_begin, itr+1);
+				if (info->state == CAT_IS_RECEIVED_HEADER)
+					return;
+			}
+			info->line_begin = itr+1;
+		}
+	}
+}
+
+void test_and_kill_cat(struct cat_info* info){
+	if (info->ex_w_in_r_shutdowned && info->in_w_ex_r_shutdowned){
+		if (info->in_fd != -1){
+			close(info->in_fd);
+			info->in_fd = -1;
+		}
+		if (info->ex_fd != -1){
+			close(info->ex_fd);
+			info->ex_fd = -1;
+		}
+	}
+
+	if (info->in_fd  == -1 && info->ex_fd == -1){
+		free_cat(info);
+	}
+}
+
 void ex_action(struct cat_info* info, struct epoll_event* ev){
-	printf("----ex\n");
+	printf("----ex%i,%i\n",info->ex_fd, info->in_fd);
 	if (ev->events & EPOLLIN){
-		printf("ex_read\n");
-		transfer_ex_to_in(info);
+		//printf("ex_read\n");
+		if (info->state == CAT_IS_RECEIVING_HEADER)
+			precess_header(info);
+		if (info->state == CAT_IS_RECEIVED_HEADER)
+			transfer_ex_to_in(info);
 	}
 	if (ev->events & EPOLLOUT){
-		printf("ex_write\n");
+		//printf("ex_write\n");
 		transfer_in_to_ex(info);
 	}
 
@@ -302,39 +413,50 @@ void ex_action(struct cat_info* info, struct epoll_event* ev){
 		printf("ex_rd_closed\n");
 		if (rcp_buffer_data_size(&info->ex_to_in_buffer) == 0){
 			shutdown(info->in_fd, SHUT_WR);
+			info->in_w_ex_r_shutdowned = 1;
+		}
+		if (info->in_fd == -1){
+			close(info->ex_fd);
+			info->ex_fd = -1;
 		}
 	}
 
 	if (ev->events & EPOLLHUP){
 		printf("ex_all_closed\n");
-		//printf("in_all_closed\n");
-		//kill_cat(info);
 		close(info->ex_fd);
+		info->ex_fd = -1;
 	}
+
+	test_and_kill_cat(info);
 }
 
 void in_action(struct cat_info* info, struct epoll_event* ev){
-	printf("----in\n");
+	printf("----in%i,%i\n",info->ex_fd, info->in_fd);
 	if (ev->events & EPOLLIN){
-		printf("in_read\n");
+		//printf("in_read\n");
 		transfer_in_to_ex(info);
 	}
 	if (ev->events & EPOLLOUT){
-		printf("in_write\n");
-		transfer_ex_to_in(info);
+		//printf("in_write\n");
+		if (info->state == CAT_IS_RECEIVING_HEADER)
+			precess_header(info);
+		if (info->state == CAT_IS_RECEIVED_HEADER)
+			transfer_ex_to_in(info);
 	}
 
 	if (ev->events & EPOLLRDHUP){
 		printf("in_rd_closed\n");
 		if (rcp_buffer_data_size(&info->in_to_ex_buffer) == 0){
 			shutdown(info->ex_fd, SHUT_WR);
+			info->ex_w_in_r_shutdowned = 1;
 		}
 	}
 
 	if (ev->events & EPOLLHUP){
 		printf("in_all_closed\n");
-		//printf("in_all_closed\n");
-		//kill_cat(info);
 		close(info->in_fd);
+		info->in_fd = -1;
 	}
+
+	test_and_kill_cat(info);
 }
