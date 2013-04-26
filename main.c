@@ -5,14 +5,16 @@
 #include <errno.h>
 #include <unistd.h>
 #include <pwd.h>
+#include <fcntl.h>
 #include <arpa/inet.h>
 #include <sys/epoll.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include "rcp_buffer.h"
 
-static const uint16_t input_port = 8080;
+static const uint16_t input_port = 4002;
 static const uint32_t buffer_size=4096;// and maximum http header size
 
 #define max_connection_count  1024
@@ -22,6 +24,7 @@ struct output_info{
 	uint16_t output_port;
 };
 
+static const char* log_file_path = "/var/log/brown_cat.log";
 //process owner name
 static const char* user_name = "czel";
 static const char* target_field_name = "Host";
@@ -29,11 +32,7 @@ static const char* target_field_name = "Host";
 //Host name and related internal port number.
 //Last ently must be NULL host name and used as default.
 static struct output_info target_table[] = {
-	{"127.0.0.1:8080", 8080},
-	{"www.tuna-cat.com", 8080},
-	{"lab.tuna-cat.com", 8080},
-	{"rcp.tuna-cat.com", 4001},
-	{NULL, 80}//default
+	{NULL, 4001}//default
 };
 
 #define CAT_IS_RECEIVING_HEADER 0
@@ -74,6 +73,17 @@ static struct cat_info info_buffer[max_connection_count];
 
 struct cat_info* free_info;
 
+static int epfd = -1;
+static int logfd = -1;
+
+void write_log(const char* str){
+	const char nl = '\n';
+	write(logfd, str, strlen(str));
+	write(logfd, &nl, 1);
+	printf(str);
+	printf("\n");
+}
+
 ///
 //prototypes
 void setup_new_connection(int epfd);
@@ -102,14 +112,20 @@ void free_cat(struct cat_info* info){
 	free_info = info;
 	info->next = old_free;
 	//printf("i'm dead \n");
+	write_log("cat gone");
 }
 
-static int epfd = -1;
 
 int main(int argc, char **argv){
 
 	//setup ep
 	epfd = epoll_create(1);
+
+	//setup logfile
+	logfd = open(
+		log_file_path, 
+		O_WRONLY | O_APPEND | O_CREAT | O_SYNC,
+		S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
 
 	//setup info buffer
 	for (int i=0; i<max_connection_count; i++){
@@ -164,6 +180,8 @@ int main(int argc, char **argv){
 		if (err) return 0;
 	}
 
+	write_log("start server");
+
 	//main loop
 	while (1){
 		const int max_events_count = 16;
@@ -173,6 +191,7 @@ int main(int argc, char **argv){
 			//error
 			if (errno == EINTR)
 				continue; //It makes debuger to attach this process.
+			write_log("epoll fail");
 			return 0;
 		}
 		for (int i = 0; i<nfds; i++){
@@ -188,12 +207,14 @@ int main(int argc, char **argv){
 }
 
 void setup_new_connection(int listen_fd){
+	write_log("new cat");
 	//printf("----yay, new cat\n");
 	struct sockaddr c_addr;
 	socklen_t addr_len = sizeof c_addr;
 	struct cat_info* info = free_info;
 	if (info == NULL){
 		//process_error here
+		write_log("No free cat.");
 		return;
 	}
 	free_info = info->next;
@@ -204,7 +225,11 @@ void setup_new_connection(int listen_fd){
 				EPOLLRDHUP|EPOLLERR|EPOLLHUP|EPOLLET;
 	ev.data.ptr = &info->ex_event;
 	int err = epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev);
-	if (err) return;
+
+	if (err){
+		write_log("fail epoll ctl");
+		return;
+	}
 
 	info->ex_fd = fd;
 }
@@ -212,7 +237,7 @@ void setup_new_connection(int listen_fd){
 
 void setup_in_fd(struct cat_info* info, struct output_info *o_info){
 
-	char* ip = "183.181.20.215";
+	char* ip = "127.0.0.1";
 
 	struct sockaddr_in s_addr;
 	bzero(&s_addr, sizeof s_addr);
@@ -225,6 +250,7 @@ void setup_in_fd(struct cat_info* info, struct output_info *o_info){
 	err = connect(fd, (struct sockaddr*) &s_addr, sizeof s_addr);
 	if (err){
 		if (errno != EINPROGRESS){
+			write_log("fail connect");
 			//printf("connect fail\n");
 			return;
 		}
@@ -238,7 +264,11 @@ void setup_in_fd(struct cat_info* info, struct output_info *o_info){
 				EPOLLRDHUP|EPOLLERR|EPOLLHUP|EPOLLET;
 	ev.data.ptr = &info->in_event;
 	err = epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev);
-	if (err) return;
+	if (err){
+		write_log("fail epoll ctl");
+		return;
+	}
+
 
 	//printf("connect to in\n");
 }
@@ -436,6 +466,7 @@ void ex_action(struct cat_info* info, struct epoll_event* ev){
 	}
 
 	if (ev->events & EPOLLERR){
+		write_log("sock err");
 		//printf("ex_err\n");
 	}
 
@@ -471,6 +502,7 @@ void in_action(struct cat_info* info, struct epoll_event* ev){
 	}
 
 	if (ev->events & EPOLLERR){
+		write_log("sock err");
 		//printf("in_err\n");
 	}
 
