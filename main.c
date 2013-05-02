@@ -103,6 +103,8 @@ void reset_cat(struct cat_info* info){
 	info->ex_event.action= ex_action;
 	rcp_buffer_consumed_all(&info->ex_to_in_buffer);
 	rcp_buffer_consumed_all(&info->in_to_ex_buffer);
+	rcp_buffer_cleanup(&info->ex_to_in_buffer);
+	rcp_buffer_cleanup(&info->in_to_ex_buffer);
 	info->state = CAT_IS_RECEIVING_HEADER;
 	info->line_begin = rcp_buffer_data(&info->ex_to_in_buffer);
 }
