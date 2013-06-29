@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <strings.h>
 #include <stdint.h>
+#include <stdarg.h>
 #include <errno.h>
 #include <unistd.h>
 #include <pwd.h>
@@ -14,7 +15,7 @@
 #include <netinet/in.h>
 #include "rcp_buffer.h"
 
-static const uint16_t input_port = 4002;
+static const uint16_t input_port = 80;
 static const uint32_t buffer_size=4096;// and maximum http header size
 
 #define max_connection_count  1024
@@ -32,7 +33,9 @@ static const char* target_field_name = "Host";
 //Host name and related internal port number.
 //Last ently must be NULL host name and used as default.
 static struct output_info target_table[] = {
-	{NULL, 4001}//default
+	{"rcp.tuna-cat.com", 4001},
+	{"rcp.tuna-cat.com:80", 4001},
+	{NULL, 8080}//default
 };
 
 #define CAT_IS_RECEIVING_HEADER 0
@@ -74,7 +77,7 @@ static struct cat_info info_buffer[max_connection_count];
 
 struct cat_info* free_info;
 
-static int cat_id = 0
+static int cat_id = 0;
 
 static int epfd = -1;
 //static int logfd = -1;
@@ -92,12 +95,14 @@ void print_log(const char* str){
 void print_log(const char* format, ...){
 	va_list args;
 	va_start(args, format);
-	vaprintf(log_file, format, args);
+	vfprintf(log_file, format, args);
 	va_end(args);
 
 	va_start(args, format);
-	vprintf(log_file, format, args);
+	vprintf(format, args);
 	va_end(args);
+
+	fflush(log_file);
 }
 
 ///
@@ -145,7 +150,7 @@ int main(int argc, char **argv){
 		//log_file_path, 
 		//O_WRONLY | O_APPEND | O_CREAT | O_SYNC,
 		//S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
-	logfile = fopen("a")
+	log_file = fopen(log_file_path, "a");
 
 	//setup info buffer
 	for (int i=0; i<max_connection_count; i++){
@@ -414,8 +419,10 @@ void process_line(struct cat_info* info, uint8_t *begin, uint8_t *end){
 void precess_header(struct cat_info* info){
 	struct rcp_buffer* buffer = &info->ex_to_in_buffer;
 	ssize_t r_len;
-	if (rcp_buffer_space_size(buffer) != 0)
-		r_len = receive_from(info->ex_fd, buffer);
+	if (rcp_buffer_space_size(buffer) == 0){
+		print_log("(%i)header too long\n",info -> id);
+	}
+	r_len = receive_from(info->ex_fd, buffer);
 
 	uint8_t *data_end = 
 		rcp_buffer_data(buffer)+rcp_buffer_data_size(buffer);
