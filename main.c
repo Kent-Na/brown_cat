@@ -67,21 +67,37 @@ struct cat_info{
 
 	uint8_t in_w_ex_r_shutdowned;
 	uint8_t ex_w_in_r_shutdowned;
+	int id;
 };
 
 static struct cat_info info_buffer[max_connection_count];
 
 struct cat_info* free_info;
 
-static int epfd = -1;
-static int logfd = -1;
+static int cat_id = 0
 
-void write_log(const char* str){
+static int epfd = -1;
+//static int logfd = -1;
+FILE* log_file = NULL;
+/*
+void print_log(const char* str){
 	const char nl = '\n';
 	write(logfd, str, strlen(str));
 	write(logfd, &nl, 1);
 	printf(str);
 	printf("\n");
+}
+*/
+
+void print_log(const char* format, ...){
+	va_list args;
+	va_start(args, format);
+	vaprintf(log_file, format, args);
+	va_end(args);
+
+	va_start(args, format);
+	vprintf(log_file, format, args);
+	va_end(args);
 }
 
 ///
@@ -107,6 +123,7 @@ void reset_cat(struct cat_info* info){
 	rcp_buffer_cleanup(&info->in_to_ex_buffer);
 	info->state = CAT_IS_RECEIVING_HEADER;
 	info->line_begin = rcp_buffer_data(&info->ex_to_in_buffer);
+	info->id = cat_id++;
 }
 
 void free_cat(struct cat_info* info){
@@ -114,7 +131,7 @@ void free_cat(struct cat_info* info){
 	free_info = info;
 	info->next = old_free;
 	//printf("i'm dead \n");
-	write_log("cat gone");
+	print_log("(%i)cat gone\n", info->id);
 }
 
 
@@ -124,10 +141,11 @@ int main(int argc, char **argv){
 	epfd = epoll_create(1);
 
 	//setup logfile
-	logfd = open(
-		log_file_path, 
-		O_WRONLY | O_APPEND | O_CREAT | O_SYNC,
-		S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+	//logfd = open(
+		//log_file_path, 
+		//O_WRONLY | O_APPEND | O_CREAT | O_SYNC,
+		//S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+	logfile = fopen("a")
 
 	//setup info buffer
 	for (int i=0; i<max_connection_count; i++){
@@ -182,18 +200,18 @@ int main(int argc, char **argv){
 		if (err) return 0;
 	}
 
-	write_log("start server");
+	print_log("start server\n");
 
 	//main loop
 	while (1){
-		const int max_events_count = 16;
+		const int max_events_count = 32;
 		struct epoll_event events[max_events_count];
 		int nfds = epoll_wait(epfd, events, max_events_count, -1);
 		if (nfds<0){
 			//error
 			if (errno == EINTR)
 				continue; //It makes debuger to attach this process.
-			write_log("epoll fail");
+			print_log("epoll fail\n");
 			return 0;
 		}
 		for (int i = 0; i<nfds; i++){
@@ -209,18 +227,18 @@ int main(int argc, char **argv){
 }
 
 void setup_new_connection(int listen_fd){
-	write_log("new cat");
 	//printf("----yay, new cat\n");
 	struct sockaddr c_addr;
 	socklen_t addr_len = sizeof c_addr;
 	struct cat_info* info = free_info;
 	if (info == NULL){
 		//process_error here
-		write_log("No free cat.");
+		print_log("No free cat.\n");
 		return;
 	}
 	free_info = info->next;
 	reset_cat(info);
+	print_log("(%i)new cat\n", info->id);
 	int fd = accept4(listen_fd, &c_addr, &addr_len, SOCK_NONBLOCK);
 	struct epoll_event ev;
 	ev.events = EPOLLIN|EPOLLOUT|EPOLLPRI|
@@ -229,7 +247,7 @@ void setup_new_connection(int listen_fd){
 	int err = epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev);
 
 	if (err){
-		write_log("fail epoll ctl");
+		print_log("fail epoll ctl\n");
 		return;
 	}
 
@@ -252,7 +270,7 @@ void setup_in_fd(struct cat_info* info, struct output_info *o_info){
 	err = connect(fd, (struct sockaddr*) &s_addr, sizeof s_addr);
 	if (err){
 		if (errno != EINPROGRESS){
-			write_log("fail connect");
+			print_log("fail connect\n");
 			//printf("connect fail\n");
 			return;
 		}
@@ -267,7 +285,7 @@ void setup_in_fd(struct cat_info* info, struct output_info *o_info){
 	ev.data.ptr = &info->in_event;
 	err = epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev);
 	if (err){
-		write_log("fail epoll ctl");
+		print_log("fail epoll ctl\n");
 		return;
 	}
 
@@ -468,7 +486,8 @@ void ex_action(struct cat_info* info, struct epoll_event* ev){
 	}
 
 	if (ev->events & EPOLLERR){
-		write_log("sock err");
+		print_log("(%i)sock err\n", info->id);
+		//print_log("sock err");
 		//printf("ex_err\n");
 	}
 
@@ -504,7 +523,7 @@ void in_action(struct cat_info* info, struct epoll_event* ev){
 	}
 
 	if (ev->events & EPOLLERR){
-		write_log("sock err");
+		print_log("(%i)sock err\n", info->id);
 		//printf("in_err\n");
 	}
 
