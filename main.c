@@ -75,7 +75,8 @@ struct cat_info{
 
 static struct cat_info info_buffer[max_connection_count];
 
-struct cat_info* free_info;
+struct cat_info* free_info = NULL;
+struct cat_info* dead_info = NULL;
 
 static int cat_id = 0;
 
@@ -132,11 +133,30 @@ void reset_cat(struct cat_info* info){
 }
 
 void free_cat(struct cat_info* info){
-	struct cat_info* old_free = free_info;
-	free_info = info;
-	info->next = old_free;
+	struct cat_info* old_dead = dead_info;
+	dead_info = info;
+	info->next = old_dead;
 	//printf("i'm dead \n");
-	print_log("(%i)cat gone\n", info->id);
+	print_log("(%i)cat killed\n", info->id);
+}
+
+void recycle_cat(){
+	struct cat_info* cat = dead_info;
+	while (cat){
+		struct cat_info* next_cat = cat -> next;
+		struct cat_info* test = next_cat;
+		while (test){
+			if (test == cat) break;
+			test = test -> next;
+		}
+		if (test) continue;
+		struct cat_info* old_free = free_info;
+		free_info = cat;
+		cat->next = old_free;
+		print_log("(%i)cat gone\n", cat->id);
+		cat = next_cat;
+	}
+	dead_info = NULL;
 }
 
 
@@ -227,6 +247,7 @@ int main(int argc, char **argv){
 			else
 				info->action(info->target, event);
 		}
+		recycle_cat();
 	}
 	return 0;
 }
