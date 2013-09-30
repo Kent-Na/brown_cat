@@ -133,9 +133,12 @@ void reset_cat(struct cat_info* info){
 }
 
 void free_cat(struct cat_info* info){
+	if (info->state == CAT_WANT_DIE) return;
+
 	struct cat_info* old_dead = dead_info;
 	dead_info = info;
 	info->next = old_dead;
+	info->state = CAT_WANT_DIE;
 	//printf("i'm dead \n");
 	print_log("(%i)cat killed\n", info->id);
 }
